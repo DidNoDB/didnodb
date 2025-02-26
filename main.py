@@ -2,14 +2,20 @@ import os
 import json
 import hashlib
 import uuid
-from fastapi import FastAPI, HTTPException, Depends
+import jwt
+import datetime
+from fastapi import FastAPI, HTTPException, Depends, Header
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.requests import Request
 from pydantic import BaseModel
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 DB_FOLDER = "db/data"
 USERS_FILE = os.path.join(DB_FOLDER, "users.json")
+
+SECRET_KEY = "my_super_secret_key" # TODO: Change this later
+ALGORITHM = "HS256"
+EXP_HOURS = 1
 
 os.makedirs(DB_FOLDER, exist_ok=True)
 
@@ -31,6 +37,22 @@ def load_users() -> Dict[str, Any]:
 def save_users(users: Dict[str, Any]):
     with open(USERS_FILE, "w") as f:
         json.dump(users, f, indent=4)
+
+def create_jwt(username: str) -> str:
+    payload = {
+        "sub": username,
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=EXP_HOURS)
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+def verify_jwt(token: str) -> Optional[str]:
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload.get("sub")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 def get_user_folder(username: str) -> str:
     user_folder = os.path.join(DB_FOLDER, username)
@@ -59,19 +81,17 @@ def login(user: User, request: Request):
     users = load_users()
     if user.username not in users or users[user.username]["password"] != hash_password(user.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    request.session["username"] = user.username
-    return {"message": "Login successful"}
+    token = create_jwt(user.username)
+    return {"access_token": token, "token_type": "bearer" }
 
 @didnodb.post("/logout")
 def logout(request: Request):
     request.session.clear()
-    return {"message": "Logout successful"}
+    return { "message": "Logout successful" }
 
 @didnodb.post("/data")
-def save_data(data: DataModel, request: Request):
-    username = request.session.get("username")
-    if not username:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+def save_data(data: DataModel, authorization: str = Header(None)):
+    username = verify_jwt(authorization)
     user_folder = get_user_folder(username)
     model_id = str(uuid.uuid4())
     model_path = os.path.join(user_folder, f"{model_id}.json")
@@ -80,10 +100,8 @@ def save_data(data: DataModel, request: Request):
     return {"message": "Data saved", "model_id": model_id}
 
 @didnodb.get("/data/{model_id}")
-def get_data(model_id: str, request: Request):
-    username = request.session.get("username")
-    if not username:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+def get_data(model_id: str, authorization: str = Header(None)):
+    username = verify_jwt(authorization)
     model_path = os.path.join(DB_FOLDER, username, f"{model_id}.json")
     if not os.path.exists(model_path):
         raise HTTPException(status_code=404, detail="Model not found")
@@ -91,10 +109,8 @@ def get_data(model_id: str, request: Request):
         return json.load(f)
     
 @didnodb.get("/data")
-def get_all_data(request: Request):
-    username = request.session.get("username")
-    if not username:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+def get_all_data(authorization: str = Header(None)):
+    username = verify_jwt(authorization)
     user_folder = get_user_folder(username)
     all_data = {}
     for file in os.listdir(user_folder):
@@ -105,10 +121,8 @@ def get_all_data(request: Request):
     return all_data
 
 @didnodb.delete("/data/{model_id}")
-def delete_data(model_id: str, request: Request):
-    username = request.session.get("username")
-    if not username:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+def delete_data(model_id: str, authorization: str = Header(None)):
+    username = verify_jwt(authorization)
     model_path = os.path.join(DB_FOLDER, username, f"{model_id}.json")
     if os.path.exists(model_path):
         os.remove(model_path)
@@ -117,7 +131,7 @@ def delete_data(model_id: str, request: Request):
 
 @didnodb.get("/")
 def index():
-    return { "data": "the server is running perfectly" }
+    return {"data": "The server is running perfectly"}
 
 @didnodb.get("/metrics")
 def metrics():
